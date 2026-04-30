@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python *)",
+      "Bash(git config *)",
+      "Bash(gh auth *)",
+      "Bash(gh repo *)"
+    ]
+  }
+}
