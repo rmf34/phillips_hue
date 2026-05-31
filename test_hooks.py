@@ -5,7 +5,10 @@ Run with:
 """
 from __future__ import annotations
 
+import tempfile
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import claude_hook
@@ -220,6 +223,89 @@ class CmdColorDispatchTests(unittest.TestCase):
         light = {"name": "Hall", "type": "Dimmable light"}
         state = self._send(light, "warm")
         self.assertEqual(state, {"on": True, "bri": hue_green.DEFAULT_BRI})
+
+
+class ThrottleTests(unittest.TestCase):
+    """set_color throttle: duplicate skip, time window, priority."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patches = [
+            mock.patch.object(claude_hook, "CACHE_DIR", Path(self.tmpdir)),
+            mock.patch.object(claude_hook, "HUE_ENABLED", True),
+            mock.patch.object(claude_hook, "_spawn"),
+            mock.patch.object(claude_hook, "DEBUG_LOG", None),
+        ]
+        for p in self._patches:
+            p.start()
+        self.spawn = claude_hook._spawn
+        self.data = {"session_id": "test-session"}
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_duplicate_color_is_skipped(self):
+        claude_hook.set_color("normal", self.data)
+        claude_hook.set_color("normal", self.data)
+        self.assertEqual(self.spawn.call_count, 1)
+
+    def test_different_color_goes_through(self):
+        claude_hook.set_color("normal", self.data)
+        claude_hook.set_color("blue", self.data)
+        self.assertEqual(self.spawn.call_count, 2)
+
+    def test_higher_priority_wins_within_throttle_window(self):
+        claude_hook.set_color("normal", self.data)
+        state_path = claude_hook._light_state_path(self.data)
+        state_path.write_text(f"normal\n{time.time()}")
+        claude_hook.set_color("blue", self.data)
+        self.assertEqual(self.spawn.call_count, 2)
+
+    def test_lower_priority_blocked_within_throttle_window(self):
+        claude_hook.set_color("red", self.data)
+        state_path = claude_hook._light_state_path(self.data)
+        state_path.write_text(f"red\n{time.time()}")
+        claude_hook.set_color("green", self.data)
+        self.assertEqual(self.spawn.call_count, 1)
+
+    def test_clear_light_state_allows_same_color(self):
+        claude_hook.set_color("normal", self.data)
+        claude_hook._clear_light_state(self.data)
+        claude_hook.set_color("normal", self.data)
+        self.assertEqual(self.spawn.call_count, 2)
+
+
+class SoundTests(unittest.TestCase):
+    """Sounds play regardless of HUE_ENABLED."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patches = [
+            mock.patch.object(claude_hook, "CACHE_DIR", Path(self.tmpdir)),
+            mock.patch.object(claude_hook, "HUE_ENABLED", False),
+            mock.patch.object(claude_hook, "_spawn"),
+            mock.patch.object(claude_hook, "DEBUG_LOG", None),
+        ]
+        for p in self._patches:
+            p.start()
+        self.spawn = claude_hook._spawn
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_play_calls_afplay(self):
+        claude_hook.play("/System/Library/Sounds/Glass.aiff")
+        self.spawn.assert_called_once_with(["/usr/bin/afplay", "/System/Library/Sounds/Glass.aiff"])
+
+    def test_set_color_skipped_when_disabled(self):
+        claude_hook.set_color("green", {"session_id": "x"})
+        self.spawn.assert_not_called()
 
 
 if __name__ == "__main__":

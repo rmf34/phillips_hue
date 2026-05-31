@@ -8,9 +8,12 @@ ambient status indicator, so you can keep working in another window (or
 across the room) and still know exactly what Claude is doing.
 
 - 🟡 **warm white**: Claude is working
-- 🔵 **blue**:       Claude needs you (permission prompt)
-- 🟢 **green**:      turn finished cleanly
-- 🔴 **red**:        turn ended with an error
+- 🔵 **blue**:       Claude needs you (permission prompt) + 🔔 Submarine chime
+- 🟢 **green**:      turn finished cleanly + 🔔 Glass chime
+- 🔴 **red**:        turn ended with an error + 🔔 Basso chime
+
+Sounds always play. Lights can be disabled independently via the
+`HUE_ENABLED` environment variable (see below).
 
 Stdlib + `requests`, two small Python files, no daemon, no cloud. Talks
 directly to your Hue Bridge over the LAN.
@@ -24,15 +27,15 @@ you've walked away.
 Hooks into Claude Code via `~/.claude/settings.json` and drives a single
 Hue bulb through a small color state machine:
 
-| event              | color           | meaning                                   |
-|--------------------|-----------------|-------------------------------------------|
-| `UserPromptSubmit` | warm white      | new turn started, Claude is thinking      |
-| `PreToolUse`       | warm white      | permission approved, back to work         |
-| `PostToolUse`      | (no change)     | stashes an error flag if the tool failed  |
-| `Notification`     | blue            | Claude needs your input (e.g. permission) |
-| `Stop` (clean)     | green           | turn finished, no errors                  |
-| `Stop` (errored)   | red             | turn finished, something failed           |
-| `SessionEnd`       | warm white      | Claude exited                             |
+| event              | color           | sound     | meaning                                   |
+|--------------------|-----------------|-----------|-------------------------------------------|
+| `UserPromptSubmit` | warm white      |           | new turn started, Claude is thinking      |
+| `PreToolUse`       | warm white      |           | permission approved, back to work         |
+| `PostToolUse`      | (no change)     |           | stashes an error flag if the tool failed  |
+| `Notification`     | blue            | Submarine | Claude needs your input (e.g. permission) |
+| `Stop` (clean)     | green           | Glass     | turn finished, no errors                  |
+| `Stop` (errored)   | red             | Basso     | turn finished, something failed           |
+| `SessionEnd`       | warm white      |           | Claude exited                             |
 
 Errors are detected two ways: explicit failure on a `PostToolUse` (non-zero
 exit, `is_error: true`, etc.), and a phrase-level heuristic on Claude's
@@ -195,6 +198,38 @@ you think it is.
 Send Claude any message and watch the bulb cycle: warm white → green (or
 red) at the end.
 
+### 8. Disable lights (sounds only)
+
+Set the `HUE_ENABLED` environment variable to `false` to turn off all
+Hue light commands while keeping the macOS sound chimes active:
+
+```bash
+export HUE_ENABLED=false
+```
+
+Or with [direnv](https://direnv.net/), add to your `.envrc`:
+
+```bash
+export HUE_ENABLED=false
+```
+
+The default is `true` (lights on). Accepted truthy values: `true`, `yes`,
+`1`.
+
+### Throttle and priority
+
+To protect bulb hardware from excessive API calls, `set_color` throttles
+requests:
+
+- **Duplicate skip**: if the light is already the requested color, the
+  call is skipped entirely.
+- **Priority within throttle window** (0.3 seconds): if a new color
+  arrives before the window expires, it only goes through if it outranks
+  the current color. Priority order (highest first): red > blue > green >
+  normal. This ensures an error (red) or permission prompt (blue) is never
+  swallowed by a lower-priority "back to working" (normal).
+- The throttle state resets at the start of each turn (`UserPromptSubmit`).
+
 ## `hue_green.py` as a standalone tool
 
 The light controller is useful by itself, totally independent of Claude:
@@ -234,11 +269,14 @@ if set):
   consumed (and unlinked) by `Stop`. Lives across hook invocations within
   a single turn. Per-session so concurrent Claude Code sessions don't
   clobber each other's error state.
+- `light_state.<session_id>`: tracks the last color sent and its
+  timestamp, used by the throttle to skip duplicates and enforce priority.
+  Cleared at the start of each turn (`UserPromptSubmit`).
 - `debug.log`: append-only log of every event payload. Useful when
-  triaging "why didn't the light change?". Set `DEBUG_LOG = None` in
-  `claude_hook.py` to silence it. Spawn failures (e.g. `.venv/bin/python`
-  missing) also land here, so check it first if the bulb stops responding
-  to events.
+  triaging "why didn't the light change?". Throttle skips are also
+  logged here. Set `DEBUG_LOG = None` in `claude_hook.py` to silence it.
+  Spawn failures (e.g. `.venv/bin/python` missing) also land here, so
+  check it first if the bulb stops responding to events.
 
 ## Tests
 
@@ -260,6 +298,13 @@ the light-name resolver:
 The Bridge's local API (`http://<ip>/api/<username>/...`) has been stable
 for years. This code uses the v1 endpoint because it's simpler than the
 v2 / CLIP API and every Hue Bridge in the wild speaks it.
+
+## Disclaimer
+
+This software sends commands to your Philips Hue bulbs via the Bridge
+API. While throttling and priority logic reduce unnecessary calls, the
+authors are not responsible for any damage to your bulbs, Bridge, or
+network resulting from use of this tool. Use at your own risk.
 
 ## License
 

@@ -4,12 +4,16 @@ Claude Code hook dispatcher → Philips Hue light + macOS chime.
 Wired up from ~/.claude/settings.json. Reads hook event JSON from stdin,
 picks the right color and sound, and invokes hue_green.py / afplay.
 
-Lights are gated by the HUE_ENABLED env var (default: false).
+Lights are gated by the HUE_ENABLED env var (default: true).
 Sounds always play.
 
+Throttle: duplicate colors are skipped, and rapid transitions within
+HUE_THROTTLE_SECONDS respect a priority order (red > blue > green >
+normal) so urgent signals are never swallowed by lower-priority ones.
+
 State machine:
-    UserPromptSubmit  -> warm white (Claude working)
-    Notification      -> blue (needs input/permission) + Submarine chime
+    UserPromptSubmit  -> warm white (Claude working)    + reset throttle
+    Notification      -> blue (needs input/permission)  + Submarine chime
     PreToolUse        -> warm white (permission approved, back to work)
     PostToolUse       -> stashes an error flag if the tool failed
     Stop (no errors)  -> green (done cleanly)           + Glass chime
@@ -25,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # ---- config ----
@@ -43,6 +48,19 @@ DEFAULT_LIGHT = "5"
 SOUND_SUCCESS      = "/System/Library/Sounds/Glass.aiff"
 SOUND_ERROR        = "/System/Library/Sounds/Basso.aiff"
 SOUND_NOTIFICATION = "/System/Library/Sounds/Submarine.aiff"
+
+# Minimum seconds between Hue API calls. Within this window, only
+# higher-priority colors go through (red > blue > green > normal).
+HUE_THROTTLE_SECONDS = 0.3
+
+# Higher number = higher priority. A color change within the throttle window
+# is only sent if the new color outranks the current one.
+COLOR_PRIORITY: dict[str, int] = {
+    "normal": 0,
+    "green": 1,
+    "blue": 2,
+    "red": 3,
+}
 
 # State + debug log live under XDG cache so they're per-user and not in
 # world-writable /tmp.
@@ -84,6 +102,34 @@ def _error_flag_path(data: dict) -> Path:
     return CACHE_DIR / f"error_flag.{_session_key(data)}"
 
 
+def _light_state_path(data: dict) -> Path:
+    return CACHE_DIR / f"light_state.{_session_key(data)}"
+
+
+def _read_light_state(data: dict) -> tuple[str, float]:
+    """Return (last_color, timestamp) or ("", 0.0) if no state."""
+    try:
+        raw = _light_state_path(data).read_text()
+        parts = raw.strip().split("\n", 1)
+        return parts[0], float(parts[1])
+    except (OSError, ValueError, IndexError):
+        return "", 0.0
+
+
+def _write_light_state(data: dict, color: str) -> None:
+    try:
+        _light_state_path(data).write_text(f"{color}\n{time.time()}")
+    except OSError:
+        pass
+
+
+def _clear_light_state(data: dict) -> None:
+    try:
+        _light_state_path(data).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _debug(msg: str) -> None:
     if DEBUG_LOG is None:
         return
@@ -111,9 +157,21 @@ def _spawn(cmd: list[str]) -> None:
         _debug(f"spawn failed for {cmd!r}: {e}")
 
 
-def set_color(color: str) -> None:
+def set_color(color: str, data: dict) -> None:
     if not HUE_ENABLED:
         return
+    last_color, last_time = _read_light_state(data)
+    now = time.time()
+    if color == last_color:
+        _debug(f"throttle: skipping duplicate {color}")
+        return
+    if now - last_time < HUE_THROTTLE_SECONDS:
+        new_pri = COLOR_PRIORITY.get(color, 0)
+        old_pri = COLOR_PRIORITY.get(last_color, 0)
+        if new_pri <= old_pri:
+            _debug(f"throttle: skipping {color} (priority {new_pri} <= {last_color} priority {old_pri})")
+            return
+    _write_light_state(data, color)
     _spawn([VENV_PYTHON, HUE_SCRIPT, "color", color, _light_id()])
 
 
@@ -219,7 +277,8 @@ def main() -> int:
 
     if event == "UserPromptSubmit":
         error_flag.unlink(missing_ok=True)   # new turn, clean slate
-        set_color("normal")
+        _clear_light_state(data)
+        set_color("normal", data)
 
     elif event == "Notification":
         # Skip idle-timeout notifications ("Claude is waiting for your input"),
@@ -228,14 +287,14 @@ def main() -> int:
         # prompts.
         ntype = str(data.get("notification_type", "")).lower()
         if ntype not in {"idle_prompt", "idle"}:
-            set_color("blue")
+            set_color("blue", data)
             play(SOUND_NOTIFICATION)
 
     elif event == "PreToolUse":
         # Fires when a tool is actually about to run (i.e., after any permission
         # approval). If the light was blue waiting for the user, flip it back
         # to "working" now that Claude is moving again.
-        set_color("normal")
+        set_color("normal", data)
 
     elif event == "PostToolUse":
         if tool_errored(data):
@@ -249,15 +308,15 @@ def main() -> int:
         errored = error_flag.exists() or response_indicates_error(data)
         error_flag.unlink(missing_ok=True)
         if errored:
-            set_color("red")
+            set_color("red", data)
             play(SOUND_ERROR)
         else:
-            set_color("green")
+            set_color("green", data)
             play(SOUND_SUCCESS)
 
     elif event == "SessionEnd":
         error_flag.unlink(missing_ok=True)
-        set_color("normal")
+        set_color("normal", data)
 
     return 0
 
