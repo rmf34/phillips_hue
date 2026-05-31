@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+VENV="$ROOT/.venv/bin"
+
+echo "=== ruff ==="
+"$VENV/ruff" check "$ROOT"/*.py
+
+echo "=== mypy ==="
+"$VENV/mypy" --exclude test_ "$ROOT"/*.py
+
+echo "=== tests ==="
+"$VENV/python" -m unittest test_hooks.py -v
+
+echo "=== all checks passed ==="

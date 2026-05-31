@@ -1,0 +1,19 @@
+[project]
+name = "phillips-hue"
+version = "0.1.0"
+description = "Claude Code hook → Philips Hue light + macOS chime"
+requires-python = ">=3.14"
+dependencies = ["requests>=2.28"]
+
+[project.optional-dependencies]
+dev = ["ruff", "mypy"]
+
+[tool.mypy]
+ignore_missing_imports = true
+strict = false
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]

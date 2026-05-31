@@ -1,0 +1,20 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - run: pip install requests ruff mypy
+      - run: ruff check *.py
+      - run: mypy --exclude test_ *.py
+      - run: python -m unittest test_hooks.py -v

@@ -1,10 +1,13 @@
-"""Unit tests for the bits of logic that actually branch.
+"""Unit and integration tests for the Claude Code → Hue hook.
 
 Run with:
     .venv/bin/python -m unittest test_hooks.py -v
 """
 from __future__ import annotations
 
+import io
+import json
+import shutil
 import tempfile
 import time
 import unittest
@@ -244,7 +247,6 @@ class ThrottleTests(unittest.TestCase):
     def tearDown(self):
         for p in self._patches:
             p.stop()
-        import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_duplicate_color_is_skipped(self):
@@ -296,7 +298,6 @@ class SoundTests(unittest.TestCase):
     def tearDown(self):
         for p in self._patches:
             p.stop()
-        import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_play_calls_afplay(self):
@@ -306,6 +307,153 @@ class SoundTests(unittest.TestCase):
     def test_set_color_skipped_when_disabled(self):
         claude_hook.set_color("green", {"session_id": "x"})
         self.spawn.assert_not_called()
+
+
+class MainDispatchTests(unittest.TestCase):
+    """Integration: feed event JSON to main(), verify spawn calls."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patches = [
+            mock.patch.object(claude_hook, "CACHE_DIR", Path(self.tmpdir)),
+            mock.patch.object(claude_hook, "HUE_ENABLED", True),
+            mock.patch.object(claude_hook, "_spawn"),
+            mock.patch.object(claude_hook, "DEBUG_LOG", None),
+        ]
+        for p in self._patches:
+            p.start()
+        self.spawn = claude_hook._spawn
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _feed(self, event_data: dict) -> int:
+        raw = json.dumps(event_data)
+        with mock.patch("sys.stdin", io.StringIO(raw)):
+            return claude_hook.main()
+
+    def _spawn_colors(self) -> list[str]:
+        """Extract just the color argument from set_color spawn calls."""
+        return [
+            call.args[0][3]
+            for call in self.spawn.call_args_list
+            if len(call.args[0]) >= 4 and call.args[0][1].endswith("hue_green.py")
+        ]
+
+    def _spawn_sounds(self) -> list[str]:
+        """Extract sound file paths from play spawn calls."""
+        return [
+            call.args[0][1]
+            for call in self.spawn.call_args_list
+            if call.args[0][0] == "/usr/bin/afplay"
+        ]
+
+    def test_clean_turn_lifecycle(self):
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s1"})
+        self._feed({"hook_event_name": "PreToolUse", "session_id": "s1"})
+        self._feed({"hook_event_name": "PostToolUse", "session_id": "s1",
+                     "tool_response": {"exitCode": 0}})
+        self._feed({"hook_event_name": "Stop", "session_id": "s1",
+                     "last_assistant_message": "Done."})
+        self.assertIn("green", self._spawn_colors())
+        self.assertNotIn("red", self._spawn_colors())
+        self.assertIn(claude_hook.SOUND_SUCCESS, self._spawn_sounds())
+        self.assertNotIn(claude_hook.SOUND_ERROR, self._spawn_sounds())
+
+    def test_error_turn_lifecycle(self):
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s2"})
+        self._feed({"hook_event_name": "PostToolUse", "session_id": "s2",
+                     "tool_response": {"exitCode": 1}})
+        self._feed({"hook_event_name": "Stop", "session_id": "s2",
+                     "last_assistant_message": "All good."})
+        self.assertIn("red", self._spawn_colors())
+        self.assertNotIn("green", self._spawn_colors())
+        self.assertIn(claude_hook.SOUND_ERROR, self._spawn_sounds())
+
+    def test_response_heuristic_error(self):
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s3"})
+        self._feed({"hook_event_name": "Stop", "session_id": "s3",
+                     "last_assistant_message": "I encountered an error reading the file."})
+        self.assertIn("red", self._spawn_colors())
+        self.assertIn(claude_hook.SOUND_ERROR, self._spawn_sounds())
+
+    def test_notification_triggers_blue_and_sound(self):
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s4"})
+        self.spawn.reset_mock()
+        self._feed({"hook_event_name": "Notification", "session_id": "s4",
+                     "notification_type": "permission"})
+        self.assertIn("blue", self._spawn_colors())
+        self.assertIn(claude_hook.SOUND_NOTIFICATION, self._spawn_sounds())
+
+    def test_pretooluse_after_blue_resets_to_normal(self):
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s4b"})
+        self._feed({"hook_event_name": "Notification", "session_id": "s4b",
+                     "notification_type": "permission"})
+        # Simulate the user taking time to approve (throttle window expires).
+        state_path = claude_hook._light_state_path({"session_id": "s4b"})
+        state_path.write_text(f"blue\n{time.time() - 1.0}")
+        self.spawn.reset_mock()
+        self._feed({"hook_event_name": "PreToolUse", "session_id": "s4b"})
+        self.assertIn("normal", self._spawn_colors())
+
+    def test_idle_notification_is_ignored(self):
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s5"})
+        self.spawn.reset_mock()
+        self._feed({"hook_event_name": "Notification", "session_id": "s5",
+                     "notification_type": "idle_prompt"})
+        self.assertEqual(self._spawn_colors(), [])
+        self.assertEqual(self._spawn_sounds(), [])
+
+    def test_unknown_event_is_noop(self):
+        self._feed({"hook_event_name": "SomeFutureEvent", "session_id": "s6"})
+        self.assertEqual(self._spawn_colors(), [])
+        self.assertEqual(self._spawn_sounds(), [])
+
+    def test_session_end_cleans_up_error_flag(self):
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s7"})
+        self._feed({"hook_event_name": "PostToolUse", "session_id": "s7",
+                     "tool_response": {"is_error": True}})
+        error_flag = claude_hook._error_flag_path({"session_id": "s7"})
+        self.assertTrue(error_flag.exists())
+        self._feed({"hook_event_name": "SessionEnd", "session_id": "s7"})
+        self.assertFalse(error_flag.exists())
+
+    def test_error_flag_does_not_leak_across_turns(self):
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s8"})
+        self._feed({"hook_event_name": "PostToolUse", "session_id": "s8",
+                     "tool_response": {"exitCode": 1}})
+        self._feed({"hook_event_name": "Stop", "session_id": "s8",
+                     "last_assistant_message": "Done."})
+        self.spawn.reset_mock()
+        self._feed({"hook_event_name": "UserPromptSubmit", "session_id": "s8"})
+        self._feed({"hook_event_name": "Stop", "session_id": "s8",
+                     "last_assistant_message": "All clear."})
+        self.assertIn("green", self._spawn_colors())
+        self.assertNotIn("red", self._spawn_colors())
+
+
+class SessionKeyTests(unittest.TestCase):
+    """_session_key sanitization."""
+
+    def test_normal_uuid(self):
+        key = claude_hook._session_key({"session_id": "abc-123-def"})
+        self.assertEqual(key, "abc-123-def")
+
+    def test_path_separators_stripped(self):
+        key = claude_hook._session_key({"session_id": "../../etc/passwd"})
+        self.assertNotIn("/", key)
+
+    def test_missing_session_id_uses_default(self):
+        self.assertEqual(claude_hook._session_key({}), "default")
+
+    def test_empty_session_id_uses_default(self):
+        self.assertEqual(claude_hook._session_key({"session_id": ""}), "default")
+
+    def test_long_session_id_is_truncated(self):
+        key = claude_hook._session_key({"session_id": "a" * 200})
+        self.assertLessEqual(len(key), 64)
 
 
 if __name__ == "__main__":

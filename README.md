@@ -80,11 +80,14 @@ The Bridge API is HTTP, so we need `requests`:
 ```bash
 cd /path/to/phillips_hue
 python3 -m venv .venv
-.venv/bin/pip install requests
+.venv/bin/pip install requests ruff mypy
+ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
 ```
 
 `claude_hook.py` is hard-wired to use `.venv/bin/python` next to itself,
-so don't install requests system-wide, keep it in the venv.
+so don't install requests system-wide, keep it in the venv. The last
+line installs the pre-commit hook (ruff + mypy + tests run on every
+commit).
 
 ### 4. Pair this script with the Bridge
 

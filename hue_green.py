@@ -186,23 +186,23 @@ def resolve_light(identifier: str) -> tuple[str, dict]:
         return identifier, lights[identifier]
     # Case-insensitive name match
     target = identifier.strip().lower()
-    matches = [(lid, l) for lid, l in lights.items()
-               if l.get("name", "").lower() == target]
+    matches = [(lid, light) for lid, light in lights.items()
+               if light.get("name", "").lower() == target]
     if len(matches) == 1:
         return matches[0]
     if not matches:
         # Fall back to substring search to be friendly
-        partial = [(lid, l) for lid, l in lights.items()
-                   if target in l.get("name", "").lower()]
+        partial = [(lid, light) for lid, light in lights.items()
+                   if target in light.get("name", "").lower()]
         if len(partial) == 1:
             return partial[0]
         if not partial:
             raise SystemExit(
                 f"No light matches '{identifier}'. Run `list` to see options."
             )
-        names = ", ".join(repr(l.get("name", "?")) for _, l in partial)
+        names = ", ".join(repr(light.get("name", "?")) for _, light in partial)
         raise SystemExit(f"'{identifier}' is ambiguous. Matches: {names}")
-    names = ", ".join(repr(l.get("name", "?")) for _, l in matches)
+    names = ", ".join(repr(light.get("name", "?")) for _, light in matches)
     raise SystemExit(f"Multiple lights named '{identifier}': {names}")
 
 
@@ -298,7 +298,8 @@ Backwards-compatible shortcuts (used by the Claude Code hooks):
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
-        print(USAGE); return 1
+        print(USAGE)
+        return 1
     cmd = argv[1]
     try:
         if cmd == "setup":
@@ -314,12 +315,15 @@ def main(argv: list[str]) -> int:
         # legacy shortcuts so existing Claude Code hooks keep working
         elif cmd in COLOR_PRESETS or cmd in WHITE_PRESETS:
             if len(argv) < 3:
-                print(USAGE); return 1
+                print(USAGE)
+                return 1
             cmd_color(cmd, argv[2])
         else:
-            print(USAGE); return 1
+            print(USAGE)
+            return 1
     except requests.RequestException as e:
-        print(f"Network error talking to Bridge: {e}"); return 2
+        print(f"Network error talking to Bridge: {e}")
+        return 2
     return 0
 
 
