@@ -1,16 +1,19 @@
 """
-Claude Code hook dispatcher → Philips Hue light.
+Claude Code hook dispatcher → Philips Hue light + macOS chime.
 
 Wired up from ~/.claude/settings.json. Reads hook event JSON from stdin,
-picks the right color, and invokes hue_green.py.
+picks the right color and sound, and invokes hue_green.py / afplay.
+
+Lights are gated by the HUE_ENABLED env var (default: false).
+Sounds always play.
 
 State machine:
     UserPromptSubmit  -> warm white (Claude working)
-    Notification      -> blue       (needs input/permission)
+    Notification      -> blue (needs input/permission) + Submarine chime
     PreToolUse        -> warm white (permission approved, back to work)
     PostToolUse       -> stashes an error flag if the tool failed
-    Stop (no errors)  -> green      (done cleanly)
-    Stop (with error) -> red        (tool failed this turn)
+    Stop (no errors)  -> green (done cleanly)           + Glass chime
+    Stop (with error) -> red   (tool failed this turn)  + Basso chime
     SessionEnd        -> warm white (Claude exited)
 """
 
@@ -24,7 +27,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-# ---- paths ----
+# ---- config ----
+HUE_ENABLED = (os.environ.get("HUE_ENABLED") or "true").lower() in ("1", "true", "yes")
+
 HERE        = Path(__file__).resolve().parent
 HUE_SCRIPT  = str(HERE / "hue_green.py")
 VENV_PYTHON = str(HERE / ".venv" / "bin" / "python")
@@ -34,6 +39,10 @@ HUE_CONFIG  = HERE / ".hue_config.json"
 # .hue_config.json, which is what most users should do (keeps user state out
 # of source).
 DEFAULT_LIGHT = "5"
+
+SOUND_SUCCESS      = "/System/Library/Sounds/Glass.aiff"
+SOUND_ERROR        = "/System/Library/Sounds/Basso.aiff"
+SOUND_NOTIFICATION = "/System/Library/Sounds/Submarine.aiff"
 
 # State + debug log live under XDG cache so they're per-user and not in
 # world-writable /tmp.
@@ -103,7 +112,13 @@ def _spawn(cmd: list[str]) -> None:
 
 
 def set_color(color: str) -> None:
+    if not HUE_ENABLED:
+        return
     _spawn([VENV_PYTHON, HUE_SCRIPT, "color", color, _light_id()])
+
+
+def play(sound_path: str) -> None:
+    _spawn(["/usr/bin/afplay", sound_path])
 
 
 def read_hook_input() -> dict:
@@ -214,6 +229,7 @@ def main() -> int:
         ntype = str(data.get("notification_type", "")).lower()
         if ntype not in {"idle_prompt", "idle"}:
             set_color("blue")
+            play(SOUND_NOTIFICATION)
 
     elif event == "PreToolUse":
         # Fires when a tool is actually about to run (i.e., after any permission
@@ -232,7 +248,12 @@ def main() -> int:
     elif event == "Stop":
         errored = error_flag.exists() or response_indicates_error(data)
         error_flag.unlink(missing_ok=True)
-        set_color("red" if errored else "green")
+        if errored:
+            set_color("red")
+            play(SOUND_ERROR)
+        else:
+            set_color("green")
+            play(SOUND_SUCCESS)
 
     elif event == "SessionEnd":
         error_flag.unlink(missing_ok=True)

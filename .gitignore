@@ -1,4 +1,5 @@
 .hue_config.json
 .venv/
+.envrc
 __pycache__/
 *.pyc
